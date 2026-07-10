@@ -3,9 +3,11 @@ module github.com/flywave/go-omf
 go 1.25
 
 require (
-	github.com/scigolib/hdf5 v0.14.0
+	github.com/flywave/hdf5 v0.0.0
 	github.com/stretchr/testify v1.11.1
 )
+
+replace github.com/flywave/hdf5 => ../hdf5
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect

@@ -1,11 +1,10 @@
 package omf
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 
-	"github.com/scigolib/hdf5"
+	"github.com/flywave/hdf5"
 )
 
 type ElementType int
@@ -133,7 +132,7 @@ func readElement(g *hdf5.Group) (Element, error) {
 
 	if attrs, err := g.Attributes(); err == nil {
 		for _, a := range attrs {
-			val := string(bytes.TrimRight(a.Data, "\x00"))
+			val := hdf5.AttributeStringValue(a)
 			switch a.Name {
 			case "element_type":
 				e.Type = parseElementType(val)
