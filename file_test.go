@@ -24,11 +24,11 @@ func TestOpenSquareOMF(t *testing.T) {
 	assert.Len(t, e.Vertices, 4)
 	assert.Equal(t, 2, e.TriangleCount())
 
-	// Verify vertex values
+	// Verify vertex values: [0,0,0], [1,0,0], [1,1,0], [0,1,0]
 	assert.InDelta(t, 0, e.Vertices[0][0], 0.01)
 	assert.InDelta(t, 0, e.Vertices[0][1], 0.01)
-	assert.InDelta(t, 1, e.Vertices[3][0], 0.01)
-	assert.InDelta(t, 1, e.Vertices[3][1], 0.01)
+	assert.InDelta(t, 0, e.Vertices[3][0], 0.01, "v3.X should be 0")
+	assert.InDelta(t, 1, e.Vertices[3][1], 0.01, "v3.Y should be 1")
 }
 
 func TestOpenMultiOMF(t *testing.T) {
