@@ -1,6 +1,6 @@
 module github.com/flywave/go-omf
 
-go 1.25
+go 1.24
 
 require (
 	github.com/flywave/hdf5 v0.0.0
