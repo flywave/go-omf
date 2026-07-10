@@ -1,15 +1,11 @@
-// Package omf implements reading and writing of Open Mining Format (OMF) files.
-// OMF is an HDF5-based format for storing 3D geoscientific data including
-// point sets, polylines, triangle meshes, and volumetric data.
-//
-// Format reference: https://openminingformat.org/
 package omf
 
 import (
-	"encoding/binary"
+	"bytes"
 	"fmt"
-	"io"
-	"math"
+	"os"
+
+	"github.com/scigolib/hdf5"
 )
 
 type ElementType int
@@ -31,17 +27,13 @@ type Project struct {
 }
 
 type Element struct {
-	Name        string
-	Type        ElementType
-	Vertices    []Vector3
-	Indices     []uint32
-	Data        map[string][]float64
-	Color       [3]float32
+	Name     string
+	Type     ElementType
+	Vertices []Vector3
+	Indices  []uint32
+	Data     map[string][]float64
+	Color    [3]float32
 }
-
-var byteOrder = binary.LittleEndian
-
-const formatMagic = "OMF"
 
 func (p *Project) AddTriSurf(name string, verts []Vector3, tris []uint32) {
 	p.Elements = append(p.Elements, Element{
@@ -59,15 +51,11 @@ func (p *Project) AddPointSet(name string, points []Vector3) {
 	})
 }
 
-func (p *Project) AddPolyLine(name string, points []Vector3, closed bool) {
-	e := Element{
+func (p *Project) AddPolyLine(name string, points []Vector3) {
+	p.Elements = append(p.Elements, Element{
 		Name: name, Type: ElementPolyLine,
 		Vertices: points, Data: make(map[string][]float64),
-	}
-	if closed {
-		e.Indices = []uint32{uint32(len(points))}
-	}
-	p.Elements = append(p.Elements, e)
+	})
 }
 
 func (p *Project) AddTetraMesh(name string, verts []Vector3, tets []uint32) {
@@ -78,15 +66,8 @@ func (p *Project) AddTetraMesh(name string, verts []Vector3, tets []uint32) {
 	})
 }
 
-func (p *Project) AddVolume(name string, dims [3]int, origin Vector3, spacing Vector3) {
-	p.Elements = append(p.Elements, Element{
-		Name: name, Type: ElementVolume,
-		Data: make(map[string][]float64),
-	})
-}
-
-func (e *Element) VertexCount() int { return len(e.Vertices) }
-func (e *Element) IndexCount() int  { return len(e.Indices) }
+func (e *Element) VertexCount() int  { return len(e.Vertices) }
+func (e *Element) IndexCount() int   { return len(e.Indices) }
 func (e *Element) TriangleCount() int {
 	if e.Type == ElementTriSurf {
 		return len(e.Indices) / 3
@@ -112,55 +93,161 @@ func (e *Element) Bounds() (min, max Vector3) {
 	return
 }
 
-func Write(w io.Writer, p *Project) error {
-	_ = formatMagic
-	_ = byteOrder
+func Open(path string) (*Project, error) {
+	f, err := hdf5.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("omf: open %s: %v", path, err)
+	}
+	defer f.Close()
 
-	for _, elem := range p.Elements {
-		if err := writeElement(w, elem); err != nil {
-			return err
+	p := &Project{Name: path}
+	root := f.Root()
+	return p, readElements(root, p)
+}
+
+func Save(path string, p *Project) error {
+	fw, err := hdf5.CreateForWrite(path, hdf5.CreateTruncate)
+	if err != nil {
+		return fmt.Errorf("omf: create %s: %v", path, err)
+	}
+	defer fw.Close()
+
+	return writeElements(fw, p)
+}
+
+func readElements(parent interface{ Children() []hdf5.Object }, p *Project) error {
+	for _, obj := range parent.Children() {
+		if g, ok := obj.(*hdf5.Group); ok {
+			elem, err := readElement(g)
+			if err == nil {
+				p.Elements = append(p.Elements, elem)
+			}
 		}
 	}
 	return nil
 }
 
-func writeElement(w io.Writer, e Element) error {
-	header := fmt.Sprintf("OMF:%s:verts=%d,inds=%d,name=%s\n",
-		elementTypeName(e.Type), len(e.Vertices), len(e.Indices), e.Name)
-	if _, err := io.WriteString(w, header); err != nil {
-		return err
+func readElement(g *hdf5.Group) (Element, error) {
+	e := Element{Data: make(map[string][]float64)}
+	e.Name = g.Name()
+
+	if attrs, err := g.Attributes(); err == nil {
+		for _, a := range attrs {
+			val := string(bytes.TrimRight(a.Data, "\x00"))
+			switch a.Name {
+			case "element_type":
+				e.Type = parseElementType(val)
+			case "name":
+				e.Name = val
+			}
+		}
 	}
 
-	buf := make([]byte, 4)
-	for _, v := range e.Vertices {
-		binary.LittleEndian.PutUint32(buf, math.Float32bits(float32(v[0])))
-		w.Write(buf)
-		binary.LittleEndian.PutUint32(buf, math.Float32bits(float32(v[1])))
-		w.Write(buf)
-		binary.LittleEndian.PutUint32(buf, math.Float32bits(float32(v[2])))
-		w.Write(buf)
+	for _, child := range g.Children() {
+		if ds, ok := child.(*hdf5.Dataset); ok {
+			switch ds.Name() {
+			case "vertices":
+				if data, err := ds.Read(); err == nil {
+					for i := 0; i+2 < len(data); i += 3 {
+						e.Vertices = append(e.Vertices, Vector3{
+							data[i], data[i+1], data[i+2],
+						})
+					}
+				}
+			case "indices":
+				if data, err := ds.Read(); err == nil {
+					for _, v := range data {
+						e.Indices = append(e.Indices, uint32(v))
+					}
+				}
+			}
+		}
 	}
 
-	for _, idx := range e.Indices {
-		binary.LittleEndian.PutUint32(buf, idx)
-		w.Write(buf)
-	}
+	return e, nil
+}
 
+func writeElements(fw *hdf5.FileWriter, p *Project) error {
+	for idx, elem := range p.Elements {
+		g, err := fw.CreateGroup(fmt.Sprintf("/element_%d", idx))
+		if err != nil {
+			return fmt.Errorf("omf: create group: %v", err)
+		}
+		g.WriteAttribute("element_type", elementTypeName(elem.Type))
+		g.WriteAttribute("name", elem.Name)
+
+		if len(elem.Vertices) > 0 {
+			flat := make([]float64, len(elem.Vertices)*3)
+			for i, v := range elem.Vertices {
+				flat[i*3+0] = v[0]
+				flat[i*3+1] = v[1]
+				flat[i*3+2] = v[2]
+			}
+			ds, err := fw.CreateDataset(
+				fmt.Sprintf("/element_%d/vertices", idx),
+				hdf5.Float64, []uint64{uint64(len(flat))})
+			if err != nil {
+				return fmt.Errorf("omf: create vertices: %v", err)
+			}
+			if err := ds.Write(flat); err != nil {
+				return fmt.Errorf("omf: write vertices: %v", err)
+			}
+			ds.Close()
+		}
+
+		if len(elem.Indices) > 0 {
+			ints := make([]float64, len(elem.Indices))
+			for i, v := range elem.Indices {
+				ints[i] = float64(v)
+			}
+			ds, err := fw.CreateDataset(
+				fmt.Sprintf("/element_%d/indices", idx),
+				hdf5.Float64, []uint64{uint64(len(ints))})
+			if err != nil {
+				return fmt.Errorf("omf: create indices: %v", err)
+			}
+			if err := ds.Write(ints); err != nil {
+				return fmt.Errorf("omf: write indices: %v", err)
+			}
+			ds.Close()
+		}
+	}
 	return nil
+}
+
+func parseElementType(s string) ElementType {
+	switch s {
+	case "PointSet":
+		return ElementPointSet
+	case "PolyLine":
+		return ElementPolyLine
+	case "TriSurf":
+		return ElementTriSurf
+	case "TetraMesh":
+		return ElementTetraMesh
+	case "Volume":
+		return ElementVolume
+	}
+	return ElementPointSet
 }
 
 func elementTypeName(t ElementType) string {
 	switch t {
 	case ElementPointSet:
-		return "POINTS"
+		return "PointSet"
 	case ElementPolyLine:
-		return "PLINE"
+		return "PolyLine"
 	case ElementTriSurf:
-		return "TRISURF"
+		return "TriSurf"
 	case ElementTetraMesh:
-		return "TETRAMESH"
+		return "TetraMesh"
 	case ElementVolume:
-		return "VOLUME"
+		return "Volume"
 	}
-	return "UNKNOWN"
+	return "Unknown"
+}
+
+func FileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
